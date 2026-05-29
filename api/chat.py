@@ -6,9 +6,9 @@ import httpx
 app = Flask(__name__)
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────
-AI_BASE     = "https://vie-ai-psi.vercel.app"
-SEARCH_BASE = "https://pplx-api.vercel.app/api/ask"
-LOGO_BASE   = "https://3d-logo-eight.vercel.app"
+AI_BASE = "https://vie-ai-psi.vercel.app"
+SEARCH_BASE       = "https://pplx-api.vercel.app/api/ask"
+LOGO_BASE         = "https://3d-logo-eight.vercel.app"
 
 TIMEOUT_DEFAULT = 30.0
 TIMEOUT_IMAGE   = 45.0
@@ -48,7 +48,7 @@ RULES:
 5. ONLY output valid JSON. Nothing else."""
 
 IMAGE_ENHANCER_SYSTEM = """You are an expert AI image prompt engineer.
-Expand the user request into a rich detailed prompt with lighting, quality tags like 8k photorealistic, composition, mood.
+Expand into a rich detailed prompt with lighting, quality tags like 8k photorealistic, composition, mood.
 Keep under 80 words. Output ONLY the enhanced prompt, no explanation, no quotes."""
 
 SEARCH_SUMMARIZER_SYSTEM = """You are a helpful assistant summarizing search results.
@@ -61,7 +61,7 @@ Keep replies SHORT, 2-4 lines for simple questions.
 NEVER say you cannot generate images or videos."""
 
 ERROR_MAP = {
-    "AI_AUTH_FAILED":      "AI connection issue. Admin se contact karo.",
+    "AI_AUTH_FAILED":      "AI connection issue. ANTHROPIC_API_KEY check karo.",
     "AI_RATE_LIMIT":       "AI server busy hai. Thodi der baad try karo.",
     "AI_UNAVAILABLE":      "AI service band hai. 1-2 min mein try karo.",
     "AI_SERVER_ERROR":     "AI mein error aaya. Dobara try karo.",
@@ -85,18 +85,13 @@ def format_error(msg):
             return friendly
     return f"Kuch gadbad ho gayi: {msg.split(':')[0]}. Dobara try karo."
 
-# ── ASYNC HELPERS ──────────────────────────────────────────────────────────
+# ── AI CALL (Direct Anthropic API) ─────────────────────────────────────────
 async def call_ai(system, user_msg, max_tokens=500):
+    full_prompt = f"{system}\n\nUser: {user_msg}" if system else user_msg
     async with httpx.AsyncClient(timeout=TIMEOUT_DEFAULT) as client:
-        res = await client.post(
-            f"{AI_BASE}/v1/messages",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": max_tokens,
-                "system": system,
-                "messages": [{"role": "user", "content": user_msg}],
-            },
+        res = await client.get(
+            f"{AI_BASE}/ai",
+            params={"prompt": full_prompt},
         )
     if not res.is_success:
         s = res.status_code
@@ -104,9 +99,11 @@ async def call_ai(system, user_msg, max_tokens=500):
         if s == 429: raise ValueError("AI_RATE_LIMIT")
         if s == 503: raise ValueError("AI_UNAVAILABLE")
         if s == 500: raise ValueError("AI_SERVER_ERROR")
-        raise ValueError(f"AI_ERROR_{s}")
+        raise ValueError(f"AI_ERROR_{s}: {res.text[:200]}")
     data = res.json()
-    return (data.get("content") or [{}])[0].get("text", "").strip()
+    if isinstance(data, str):
+        return data.strip()
+    return (data.get("response") or data.get("text") or data.get("result") or "").strip()
 
 async def enhance_prompt(raw):
     try:
@@ -126,6 +123,7 @@ async def search_and_summarize(query):
     sources = [{"name": s.get("name", "Source"), "url": s.get("url")} for s in (data.get("sources") or [])[:3]]
     return {"answer": summary, "sources": sources}
 
+# ── ACTION EXECUTOR ────────────────────────────────────────────────────────
 async def execute_action(action, prompt, image_url):
     if action == "chat":
         reply = await call_ai(CHAT_SYSTEM, prompt or "Hello", 600)
@@ -194,7 +192,8 @@ async def execute_action(action, prompt, image_url):
     else:
         raise ValueError(f"UNKNOWN_ACTION: {action}")
 
-async def process(method, message, image_url):
+# ── CORE HANDLER ───────────────────────────────────────────────────────────
+async def process(message, image_url):
     if not message or not message.strip():
         return 400, {"error": "message parameter zaroori hai", "example": "/api/chat?message=hello"}
 
@@ -247,7 +246,6 @@ def cors(response):
 def chat():
     if request.method == "OPTIONS":
         return "", 200
-
     if request.method == "GET":
         message   = request.args.get("message") or request.args.get("msg") or request.args.get("q") or ""
         image_url = request.args.get("imageUrl") or request.args.get("image") or request.args.get("img") or ""
@@ -255,29 +253,18 @@ def chat():
         body      = request.get_json(silent=True) or {}
         message   = body.get("message", "")
         image_url = body.get("imageUrl", "")
-
     try:
-        status, resp = asyncio.run(process(request.method, message, image_url))
+        status, resp = asyncio.run(process(message, image_url))
         return jsonify(resp), status
     except Exception as err:
-        return jsonify({
-            "error": format_error(str(err)),
-            "type": "server_error",
-            "dev": "@MANDAL4482"
-        }), 500
+        return jsonify({"error": format_error(str(err)), "type": "server_error", "dev": "@MANDAL4482"}), 500
 
-# ── ROOT ROUTE ─────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return jsonify({
         "name": "VIE AI Smart Router",
         "version": "3.0 Python",
         "dev": "@MANDAL4482",
-        "usage": {
-            "GET":  "/api/chat?message=hello",
-            "POST": "/api/chat  body: {message: 'hello'}"
-        }
+        "status": "online",
+        "usage": {"GET": "/api/chat?message=hello", "POST": "/api/chat  body: {message: 'hello'}"}
     })
-
-if __name__ == "__main__":
-    app.run(debug=True)
